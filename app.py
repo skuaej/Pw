@@ -3,7 +3,7 @@ import requests
 import sqlite3
 import os
 
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
+BOT_TOKEN = os.environ.get("8234149040:AAGsdw8QZbtKcUgylM2mn8aNW07xc7YYMpk")
 print("BOT_TOKEN loaded:", bool(BOT_TOKEN))
 
 if not BOT_TOKEN:
