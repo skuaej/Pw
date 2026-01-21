@@ -7,19 +7,21 @@ BOT_TOKEN = "YOUR_BOT_TOKEN"
 BOT_SECRET = "BOT_SECRET"
 BOT_WEBHOOK = "/endpoint"
 
-BASE_URL = "https://balanced-tahr-uhhy5-1600dc3b.koyeb.app"  # apna koyeb URL
+BASE_URL = "https://balanced-tahr-uhhy5-1600dc3b.koyeb.app"   # apna koyeb URL
+CHANNEL_ID = -1002432952660  # 👈 apna channel id daal
+
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 app = Flask(__name__)
 
 
-# ---------- HEALTH CHECK ----------
+# ---------- HEALTH ----------
 @app.route("/", methods=["GET"])
 def home():
-    return "Telegram Webhook Bot is Running!", 200
+    return "Telegram Stream Bot Running!", 200
 
 
-# ---------- STREAM ROUTE ----------
+# ---------- STREAM ----------
 @app.route("/stream/<file_id>", methods=["GET"])
 def stream_file(file_id):
     r = requests.get(
@@ -35,10 +37,7 @@ def stream_file(file_id):
     file_path = data["result"]["file_path"]
     file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
 
-    return jsonify({
-        "ok": True,
-        "file_url": file_url
-    })
+    return jsonify({"ok": True, "file_url": file_url})
 
 
 # ---------- WEBHOOK ----------
@@ -56,7 +55,7 @@ def webhook():
     return "OK", 200
 
 
-# ---------- MESSAGE HANDLER ----------
+# ---------- HANDLER ----------
 def handle_message(message):
     chat_id = message["chat"]["id"]
 
@@ -65,14 +64,11 @@ def handle_message(message):
         send_message(
             chat_id,
             "👋 Welcome!\n\n"
-            "Send me:\n"
-            "• Any file\n"
-            "• Any video\n\n"
-            "Main tumhe:\n"
-            "• stream link\n"
-            "• download link\n"
-            "• thumbnail link (video)\n\n"
-            "de dunga 😎"
+            "Send me any file or video.\n\n"
+            "Main:\n"
+            "• channel me upload karunga\n"
+            "• stream/download link dunga\n"
+            "• thumbnail link dunga (video)\n"
         )
         return
 
@@ -82,11 +78,16 @@ def handle_message(message):
         file_id = doc["file_id"]
         name = doc.get("file_name", "file")
 
+        print(f"[FILE] name={name} file_id={file_id}")
+
+        # forward to channel
+        forward_to_channel(chat_id, message["message_id"])
+
         stream_link = f"{BASE_URL}/stream/{file_id}"
 
         send_message(
             chat_id,
-            f"📁 File Received!\n\n"
+            f"📁 File Received & Uploaded to Channel!\n\n"
             f"Name: {name}\n\n"
             f"▶️ Stream / Download:\n{stream_link}"
         )
@@ -97,6 +98,10 @@ def handle_message(message):
         vid = message["video"]
         file_id = vid["file_id"]
 
+        print(f"[VIDEO] file_id={file_id}")
+
+        forward_to_channel(chat_id, message["message_id"])
+
         stream_link = f"{BASE_URL}/stream/{file_id}"
 
         thumb_text = "❌ No thumbnail"
@@ -105,9 +110,11 @@ def handle_message(message):
             thumb_link = f"{BASE_URL}/stream/{thumb_id}"
             thumb_text = f"🖼 Thumbnail Link:\n{thumb_link}"
 
+            print(f"[THUMB] thumb_file_id={thumb_id}")
+
         send_message(
             chat_id,
-            f"🎬 Video Received!\n\n"
+            f"🎬 Video Received & Uploaded to Channel!\n\n"
             f"▶️ Stream / Download:\n{stream_link}\n\n"
             f"{thumb_text}"
         )
@@ -116,14 +123,25 @@ def handle_message(message):
     send_message(chat_id, "❌ Sirf file ya video bhejo.")
 
 
-# ---------- SEND MESSAGE ----------
+# ---------- HELPERS ----------
 def send_message(chat_id, text):
-    url = f"{TELEGRAM_API}/sendMessage"
-    payload = {"chat_id": chat_id, "text": text}
-    try:
-        requests.post(url, json=payload, timeout=10)
-    except Exception as e:
-        print("Send error:", e)
+    requests.post(
+        f"{TELEGRAM_API}/sendMessage",
+        json={"chat_id": chat_id, "text": text},
+        timeout=10
+    )
+
+
+def forward_to_channel(from_chat_id, message_id):
+    requests.post(
+        f"{TELEGRAM_API}/forwardMessage",
+        json={
+            "chat_id": CHANNEL_ID,
+            "from_chat_id": from_chat_id,
+            "message_id": message_id
+        },
+        timeout=10
+    )
 
 
 # ---------- MAIN ----------
