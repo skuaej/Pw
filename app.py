@@ -1,7 +1,7 @@
 import os
 import asyncio
 from pyrogram import Client, filters, enums
-from pyrogram.errors import RPCError
+from pyrogram.errors import RPCError, PeerIdInvalid
 from aiohttp import web
 import motor.motor_asyncio
 import aiohttp_cors
@@ -15,7 +15,6 @@ try:
     API_ID = int(os.environ.get("API_ID", 0))
     API_HASH = os.environ.get("API_HASH", "")
     BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
-    # Ensure CHANNEL_ID is an integer and starts with -100
     CHANNEL_ID = int(os.environ.get("CHANNEL_ID", 0))
     MONGO_URL = os.environ.get("MONGO_URL", "")
     PORT = int(os.environ.get("PORT", 8000))
@@ -28,7 +27,6 @@ db = mongo_client["Cluster0g"]
 collection = db["files"]
 
 # --- BOT CLIENT --- #
-# use_cache=True helps with Peer ID resolution
 app = Client("auto_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
 # --- SAVE TO DB FUNCTION --- #
@@ -65,25 +63,17 @@ async def save_to_db(message):
                     "size": media.file_size
                 }
                 await collection.insert_one(file_data)
-                log(f"✅ Saved File: {name} (ID: {message.id})")
+                log(f"✅ Saved File: {name}")
             else:
-                log(f"⚠️ File already exists: {name}")
+                log(f"⚠️ File already exists in DB")
         except Exception as e:
             log(f"❌ DB Error: {e}")
 
 # --- BOT HANDLERS --- #
 
-@app.on_message(filters.command("start") & filters.private)
-async def start_command(client, message):
-    await message.reply_text(
-        "👋 **Bot is Online!**\n\n"
-        f"Connected to Channel ID: `{CHANNEL_ID}`\n"
-        "Send files to the Channel to save them."
-    )
-
 @app.on_message(filters.chat(CHANNEL_ID) & filters.media)
 async def channel_post_handler(client, message):
-    log(f"📩 Media Update in Channel: {message.id}")
+    log(f"📩 New Media detected in channel (Msg ID: {message.id})")
     await save_to_db(message)
 
 # --- WEB SERVER HANDLERS --- #
@@ -105,27 +95,19 @@ async def stream_handler(request):
         msg_id = int(request.match_info['msg_id'])
         msg = await app.get_messages(CHANNEL_ID, msg_id)
         
-        # Determine media type dynamically
         media = None
         for attr in ["video", "document", "photo", "audio"]:
             if getattr(msg, attr, None):
                 media = getattr(msg, attr)
                 break
         
-        if not media: 
-            return web.Response(status=404, text="Media not found")
+        if not media: return web.Response(status=404)
 
-        # Photo handling (Photos are lists in Pyrogram)
-        if isinstance(media, list): media = media[-1]
-
-        resp = web.StreamResponse(
-            status=200, reason='OK', 
-            headers={
-                'Content-Type': getattr(media, 'mime_type', 'application/octet-stream'),
-                'Content-Disposition': f'inline; filename="{getattr(media, "file_name", "file")}"',
-                'Content-Length': str(getattr(media, 'file_size', 0))
-            }
-        )
+        resp = web.StreamResponse(status=200, reason='OK', headers={
+            'Content-Type': getattr(media, 'mime_type', 'application/octet-stream'),
+            'Content-Disposition': f'inline; filename="{getattr(media, "file_name", "file")}"',
+            'Content-Length': str(getattr(media, 'file_size', 0))
+        })
         await resp.prepare(request)
         async for chunk in app.stream_media(media):
             await resp.write(chunk)
@@ -146,31 +128,25 @@ async def on_startup(app_web):
     me = await app.get_me()
     log(f"✅ Bot Logged in as: @{me.username}")
 
+    # SILENT CHECK: This will not crash the app anymore
     try:
-        # Check if Channel is accessible
         chat = await app.get_chat(CHANNEL_ID)
-        log(f"✅ CONNECTED TO: {chat.title} ({chat.id})")
-    except RPCError as e:
-        log(f"❌ PEER ERROR: {e}")
-        log("💡 FIX: 1. Add Bot to Channel. 2. Make Bot Admin. 3. Post a message in the channel.")
+        log(f"✅ Channel Verified: {chat.title}")
+    except Exception:
+        log("⚠️ Channel not verified yet. ACTION REQUIRED: Post a message in the channel while the bot is running.")
 
 async def on_cleanup(app_web):
-    log("🛑 Stopping Bot...")
     await app.stop()
 
 # --- MAIN ENTRY POINT --- #
 
 if __name__ == "__main__":
     server = web.Application()
-    
     server.on_startup.append(on_startup)
     server.on_cleanup.append(on_cleanup)
 
-    # CORS Setup
     cors = aiohttp_cors.setup(server, defaults={
-        "*": aiohttp_cors.ResourceOptions(
-            allow_credentials=True, expose_headers="*", allow_headers="*",
-        )
+        "*": aiohttp_cors.ResourceOptions(allow_credentials=True, expose_headers="*", allow_headers="*")
     })
     
     server.add_routes([
