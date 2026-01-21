@@ -1,17 +1,17 @@
 import os
 import requests
-from flask import Flask, render_template_string, redirect
+from flask import Flask, request, render_template_string, redirect
 from telegram import Update
-from telegram.ext import ApplicationBuilder, MessageHandler, ContextTypes, filters
-import threading
+from telegram.ext import Application, ContextTypes, MessageHandler, filters
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-BOT_USERNAME = os.getenv("BOT_USERNAME")  # without @
-CHANNEL_ID = int(os.getenv("CHANNEL_ID"))  # -100xxxx
+CHANNEL_ID = int(os.getenv("CHANNEL_ID"))
+BASE_URL = os.getenv("BASE_URL")  # e.g. https://casual-denice-uhhy5-5c4574fc.koyeb.app
 
 FILES_DB = []
 
 app = Flask(__name__)
+bot_app = Application.builder().token(BOT_TOKEN).build()
 
 HTML = """
 <!doctype html>
@@ -26,6 +26,9 @@ a{color:#0af;text-decoration:none}
 </head>
 <body>
 <h2>📁 File Server</h2>
+{% if files|length == 0 %}
+<p>No files yet. Send files to the Telegram channel.</p>
+{% endif %}
 {% for f in files %}
 <div class="card">
 <b>{{f['name']}}</b><br>
@@ -44,46 +47,67 @@ def home():
 
 @app.route("/download/<int:i>")
 def download(i):
-    file_id = FILES_DB[i]["file_id"]
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/getFile?file_id={file_id}"
-    r = requests.get(url).json()
-    path = r["result"]["file_path"]
-    return redirect(f"https://api.telegram.org/file/bot{BOT_TOKEN}/{path}")
+    try:
+        file_id = FILES_DB[i]["file_id"]
+        r = requests.get(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/getFile",
+            params={"file_id": file_id},
+            timeout=15
+        ).json()
+
+        path = r["result"]["file_path"]
+        return redirect(f"https://api.telegram.org/file/bot{BOT_TOKEN}/{path}")
+    except Exception as e:
+        return f"Error: {e}", 500
 
 @app.route("/stream/<int:i>")
 def stream(i):
-    file_id = FILES_DB[i]["file_id"]
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/getFile?file_id={file_id}"
-    r = requests.get(url).json()
-    path = r["result"]["file_path"]
-    return redirect(f"https://api.telegram.org/file/bot{BOT_TOKEN}/{path}")
+    return download(i)
+
+@app.route("/endpoint", methods=["POST"])
+async def telegram_webhook():
+    data = request.get_json(force=True, silent=True)
+    if not data:
+        return "NO DATA", 400
+
+    update = Update.de_json(data, bot_app.bot)
+    await bot_app.process_update(update)
+    return "OK"
 
 async def handle_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = update.channel_post
+    msg = update.channel_post or update.message
+    if not msg:
+        return
+
+    file_data = None
 
     if msg.video:
         f = msg.video
-        FILES_DB.append({"file_id": f.file_id, "name": "video.mp4", "type": "video"})
+        file_data = {"file_id": f.file_id, "name": "video.mp4", "type": "video"}
+
     elif msg.document:
         f = msg.document
-        FILES_DB.append({"file_id": f.file_id, "name": f.file_name, "type": "document"})
+        file_data = {"file_id": f.file_id, "name": f.file_name or "file", "type": "document"}
+
     elif msg.audio:
         f = msg.audio
-        FILES_DB.append({"file_id": f.file_id, "name": f.file_name, "type": "audio"})
+        file_data = {"file_id": f.file_id, "name": f.file_name or "audio.mp3", "type": "audio"}
+
     elif msg.photo:
         f = msg.photo[-1]
-        FILES_DB.append({"file_id": f.file_id, "name": "image.jpg", "type": "image"})
+        file_data = {"file_id": f.file_id, "name": "image.jpg", "type": "image"}
 
-    await context.bot.send_message(
-        chat_id=CHANNEL_ID,
-        text="✅ File added to web server!"
-    )
+    if file_data:
+        FILES_DB.append(file_data)
+        print("✅ File added:", file_data)
 
-def run_bot():
-    app_bot = ApplicationBuilder().token(BOT_TOKEN).build()
-    app_bot.add_handler(MessageHandler(filters.ALL, handle_files))
-    app_bot.run_polling()
+bot_app.add_handler(MessageHandler(filters.ALL, handle_files))
+
+@app.route("/setwebhook")
+def set_webhook():
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook"
+    r = requests.get(url, params={"url": f"{BASE_URL}/endpoint"}).json()
+    return r
 
 if __name__ == "__main__":
-    threading.Thread(target=run_bot).start()
     app.run(host="0.0.0.0", port=8000)
