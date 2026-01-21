@@ -2,7 +2,7 @@ from flask import Flask, request, Response
 import requests
 import sqlite3
 
-BOT_TOKEN = "PASTE_YOUR_NEW_BOT_TOKEN_HERE"
+BOT_TOKEN = "8234149040:AAGsdw8QZbtKcUgylM2mn8aNW07xc7YYMpk"
 
 app = Flask(__name__)
 
