@@ -1,8 +1,13 @@
 from flask import Flask, request, Response
 import requests
 import sqlite3
+import os
 
-BOT_TOKEN = "8234149040:AAGsdw8QZbtKcUgylM2mn8aNW07xc7YYMpk"
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+print("BOT_TOKEN loaded:", bool(BOT_TOKEN))
+
+if not BOT_TOKEN:
+    raise RuntimeError("❌ BOT_TOKEN env var not set")
 
 app = Flask(__name__)
 
@@ -20,68 +25,83 @@ CREATE TABLE IF NOT EXISTS files (
 """)
 conn.commit()
 
-# ---------- Webhook Receiver ----------
+# ---------- Webhook Receiver (CRASH-PROOF) ----------
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    data = request.get_json(force=True)
-    print("----- NEW UPDATE -----")
-    print(data)
+    try:
+        data = request.get_json(force=True)
+        print("----- NEW UPDATE -----")
+        print(data)
 
-    msg = None
-    if "channel_post" in data:
-        msg = data["channel_post"]
-    elif "message" in data:
-        msg = data["message"]
+        msg = None
+        if isinstance(data, dict):
+            if "channel_post" in data:
+                msg = data["channel_post"]
+            elif "message" in data:
+                msg = data["message"]
 
-    if not msg:
+        if not msg:
+            return "ok"
+
+        # ---------- /start ----------
+        if msg.get("text") == "/start":
+            chat_id = msg["chat"]["id"]
+            r = requests.post(
+                f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+                data={
+                    "chat_id": chat_id,
+                    "text": "✅ Bot is running on Koyeb!\nSend any file and it will appear on the web page."
+                },
+                timeout=10
+            )
+            print("sendMessage response:", r.text)
+            return "ok"
+
+        file_id = None
+        file_name = None
+        thumb_id = None
+
+        doc = msg.get("document")
+        vid = msg.get("video")
+        photos = msg.get("photo")
+        aud = msg.get("audio")
+
+        if doc:
+            file_id = doc.get("file_id")
+            file_name = doc.get("file_name", "file")
+
+        elif vid:
+            file_id = vid.get("file_id")
+            file_name = vid.get("file_name", "video.mp4")
+            thumb = vid.get("thumbnail")
+            if thumb:
+                thumb_id = thumb.get("file_id")
+
+        elif photos:
+            file_id = photos[-1].get("file_id")
+            file_name = "image.jpg"
+            thumb_id = file_id
+
+        elif aud:
+            file_id = aud.get("file_id")
+            file_name = aud.get("file_name", "audio.mp3")
+
+        caption = msg.get("caption", "")
+
+        if file_id and file_name:
+            cur.execute(
+                "INSERT INTO files (file_id, file_name, caption, thumb_id) VALUES (?, ?, ?, ?)",
+                (file_id, file_name, caption, thumb_id)
+            )
+            conn.commit()
+            print("Saved:", file_name)
+
         return "ok"
 
-    # ---------- /start ----------
-    if "text" in msg and msg.get("text") == "/start":
-        chat_id = msg["chat"]["id"]
-        requests.post(
-            f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-            data={
-                "chat_id": chat_id,
-                "text": "✅ Bot is running!\nSend any file to show on web."
-            }
-        )
+    except Exception as e:
+        # 🔥 Prevents Telegram 500 + logs real error
+        print("❌ WEBHOOK CRASH:", repr(e))
         return "ok"
-
-    file_id = None
-    file_name = None
-    thumb_id = None
-
-    if "document" in msg:
-        file_id = msg["document"]["file_id"]
-        file_name = msg["document"].get("file_name", "file")
-
-    elif "video" in msg:
-        file_id = msg["video"]["file_id"]
-        file_name = msg["video"].get("file_name", "video.mp4")
-        if "thumbnail" in msg["video"]:
-            thumb_id = msg["video"]["thumbnail"]["file_id"]
-
-    elif "photo" in msg:
-        file_id = msg["photo"][-1]["file_id"]
-        file_name = "image.jpg"
-        thumb_id = file_id
-
-    elif "audio" in msg:
-        file_id = msg["audio"]["file_id"]
-        file_name = msg["audio"].get("file_name", "audio.mp3")
-
-    caption = msg.get("caption", "")
-
-    if file_id and file_name:
-        cur.execute(
-            "INSERT INTO files (file_id, file_name, caption, thumb_id) VALUES (?, ?, ?, ?)",
-            (file_id, file_name, caption, thumb_id)
-        )
-        conn.commit()
-        print("Saved:", file_name)
-
-    return "ok"
 
 # ---------- Home Page ----------
 @app.route("/")
@@ -134,26 +154,20 @@ def thumb(file_id):
     path = r["result"]["file_path"]
     file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{path}"
 
-    resp = requests.get(
-        file_url,
-        stream=True,
-        headers={"User-Agent": "Mozilla/5.0"}
-    )
+    resp = requests.get(file_url, stream=True)
 
     return Response(
         resp.iter_content(chunk_size=8192),
         content_type=resp.headers.get("Content-Type", "image/jpeg")
     )
 
-# ---------- File Stream (CORRECT FILENAME FIX) ----------
+# ---------- File Stream (Correct Filename) ----------
 @app.route("/stream/<file_id>")
 def stream(file_id):
-    # 🔹 Get original filename from DB
     cur.execute("SELECT file_name FROM files WHERE file_id = ?", (file_id,))
     row = cur.fetchone()
     filename = row[0] if row else "file"
 
-    # 🔹 Ask Telegram for file path
     r = requests.get(
         f"https://api.telegram.org/bot{BOT_TOKEN}/getFile?file_id={file_id}"
     ).json()
@@ -164,27 +178,21 @@ def stream(file_id):
     path = r["result"]["file_path"]
     file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{path}"
 
-    # 🔹 Download from Telegram with UA header (Termux fix)
-    resp = requests.get(
-        file_url,
-        stream=True,
-        headers={"User-Agent": "Mozilla/5.0"}
-    )
+    resp = requests.get(file_url, stream=True)
 
     return Response(
         resp.iter_content(chunk_size=8192),
-        content_type=resp.headers.get(
-            "Content-Type", "application/octet-stream"
-        ),
+        content_type=resp.headers.get("Content-Type", "application/octet-stream"),
         headers={
             "Content-Disposition": f'attachment; filename="{filename}"'
         }
     )
 
-# ---------- Test ----------
-@app.route("/test")
-def test():
-    return "Webhook server is reachable!"
+# ---------- Health Check ----------
+@app.route("/health")
+def health():
+    return "OK"
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8080)
+    port = int(os.environ.get("PORT", 8000))
+    app.run(host="0.0.0.0", port=port)
