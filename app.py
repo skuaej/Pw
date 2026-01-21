@@ -20,6 +20,11 @@ FILES_DB = []
 app = Flask(__name__)
 bot_app = Application.builder().token(BOT_TOKEN).build()
 
+# 🔴 CRITICAL: initialize the Telegram application ONCE
+loop = asyncio.new_event_loop()
+asyncio.set_event_loop(loop)
+loop.run_until_complete(bot_app.initialize())
+
 HTML = """
 <!doctype html>
 <html>
@@ -48,7 +53,7 @@ Type: {{f['type']}}<br>
 </html>
 """
 
-# -------------------- WEB ROUTES --------------------
+# ---------------- WEB ROUTES ----------------
 
 @app.route("/")
 def home():
@@ -56,19 +61,14 @@ def home():
 
 @app.route("/download/<int:i>")
 def download(i):
-    try:
-        file_id = FILES_DB[i]["file_id"]
-        r = requests.get(
-            f"https://api.telegram.org/bot{BOT_TOKEN}/getFile",
-            params={"file_id": file_id},
-            timeout=15
-        ).json()
-
-        path = r["result"]["file_path"]
-        return redirect(f"https://api.telegram.org/file/bot{BOT_TOKEN}/{path}")
-    except Exception as e:
-        print("❌ Download error:", e)
-        return "Download error", 500
+    file_id = FILES_DB[i]["file_id"]
+    r = requests.get(
+        f"https://api.telegram.org/bot{BOT_TOKEN}/getFile",
+        params={"file_id": file_id},
+        timeout=15
+    ).json()
+    path = r["result"]["file_path"]
+    return redirect(f"https://api.telegram.org/file/bot{BOT_TOKEN}/{path}")
 
 @app.route("/stream/<int:i>")
 def stream(i):
@@ -77,18 +77,15 @@ def stream(i):
 @app.route("/endpoint", methods=["POST"])
 def telegram_webhook():
     data = request.get_json(force=True, silent=True)
-
-    print("📩 Webhook update received:", data)  # DEBUG LOG
+    print("📩 RAW UPDATE:", data)
 
     if not data:
         return "NO DATA", 400
 
     update = Update.de_json(data, bot_app.bot)
 
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
+    # reuse same event loop
     loop.run_until_complete(bot_app.process_update(update))
-    loop.close()
 
     return "OK"
 
@@ -99,28 +96,32 @@ def set_webhook():
         params={"url": f"{BASE_URL}/endpoint"}
     ).json()
 
-    print("🔗 setWebhook response:", r)
+    print("🔗 setWebhook:", r)
     return r
 
-# -------------------- BOT HANDLERS --------------------
+# ---------------- BOT HANDLERS ----------------
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    print("👋 /start received from:", update.effective_user.id)
+    print("👋 /start from:", update.effective_user.id)
 
     await update.message.reply_text(
         "✅ I am online!\n\n"
-        "Send files to the channel and view them on the website:\n"
+        "Send files to the channel and view them here:\n"
         f"{BASE_URL}"
     )
+
+async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    print("🏓 /ping from:", update.effective_user.id)
+    await update.message.reply_text("🏓 Pong! Bot is alive.")
 
 async def handle_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.channel_post
 
     if not msg:
-        print("❌ Update has no channel_post")
+        print("❌ Not a channel post")
         return
 
-    print("📦 Channel post received")
+    print("📦 CHANNEL POST RECEIVED")
 
     file_data = None
 
@@ -130,19 +131,11 @@ async def handle_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif msg.document:
         f = msg.document
-        file_data = {
-            "file_id": f.file_id,
-            "name": f.file_name or "file",
-            "type": "document"
-        }
+        file_data = {"file_id": f.file_id, "name": f.file_name or "file", "type": "document"}
 
     elif msg.audio:
         f = msg.audio
-        file_data = {
-            "file_id": f.file_id,
-            "name": f.file_name or "audio.mp3",
-            "type": "audio"
-        }
+        file_data = {"file_id": f.file_id, "name": f.file_name or "audio.mp3", "type": "audio"}
 
     elif msg.photo:
         f = msg.photo[-1]
@@ -153,10 +146,11 @@ async def handle_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
         print("✅ FILE STORED:", file_data)
         print("📊 TOTAL FILES:", len(FILES_DB))
     else:
-        print("ℹ Channel post but not a supported file")
+        print("ℹ Channel post but not a file")
 
 # Register handlers
 bot_app.add_handler(CommandHandler("start", start_command))
+bot_app.add_handler(CommandHandler("ping", ping_command))
 
 bot_app.add_handler(
     MessageHandler(
@@ -165,10 +159,10 @@ bot_app.add_handler(
     )
 )
 
-# -------------------- START APP --------------------
+# ---------------- START ----------------
 
 if __name__ == "__main__":
-    print("🚀 App starting...")
+    print("🚀 Bot starting...")
     print("🌐 BASE_URL:", BASE_URL)
     print("📢 CHANNEL_ID:", CHANNEL_ID)
 
