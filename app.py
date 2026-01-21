@@ -8,7 +8,8 @@ import aiohttp_cors
 API_ID = int(os.environ.get("API_ID", 12345))
 API_HASH = os.environ.get("API_HASH", "your_hash")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "your_token")
-CHANNEL_ID = int(os.environ.get("CHANNEL_ID", -100xxxxxxx))
+# SAHI (RIGHT) - Default value 0 kar do
+CHANNEL_ID = int(os.environ.get("CHANNEL_ID", 0))
 MONGO_URL = os.environ.get("MONGO_URL", "mongodb+srv://...") # Step 1 wala URL
 PORT = int(os.environ.get("PORT", 8080))
 
