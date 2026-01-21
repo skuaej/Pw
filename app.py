@@ -1,24 +1,47 @@
 import os
-from flask import Flask, request
+from flask import Flask, request, jsonify
 import requests
 
 # ========= CONFIG =========
-BOT_TOKEN = "8234149040:AAGsdw8QZbtKcUgylM2mn8aNW07xc7YYMpk"
-BOT_SECRET = "Byjjjy56uujjjjnj666"
+BOT_TOKEN = "YOUR_BOT_TOKEN"
+BOT_SECRET = "BOT_SECRET"
 BOT_WEBHOOK = "/endpoint"
 
+BASE_URL = "https://balanced-tahr-uhhy5-1600dc3b.koyeb.app"  # apna koyeb URL
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 app = Flask(__name__)
 
 
-# -------- Home --------
+# ---------- HEALTH CHECK ----------
 @app.route("/", methods=["GET"])
 def home():
-    return "✅ Telegram Webhook Bot is Running!", 200
+    return "Telegram Webhook Bot is Running!", 200
 
 
-# -------- Webhook --------
+# ---------- STREAM ROUTE ----------
+@app.route("/stream/<file_id>", methods=["GET"])
+def stream_file(file_id):
+    r = requests.get(
+        f"{TELEGRAM_API}/getFile",
+        params={"file_id": file_id},
+        timeout=10
+    )
+    data = r.json()
+
+    if not data.get("ok"):
+        return "Invalid file_id", 404
+
+    file_path = data["result"]["file_path"]
+    file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
+
+    return jsonify({
+        "ok": True,
+        "file_url": file_url
+    })
+
+
+# ---------- WEBHOOK ----------
 @app.route(BOT_WEBHOOK, methods=["POST"])
 def webhook():
     secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
@@ -33,117 +56,77 @@ def webhook():
     return "OK", 200
 
 
-# -------- Message Handler --------
+# ---------- MESSAGE HANDLER ----------
 def handle_message(message):
     chat_id = message["chat"]["id"]
 
-    # ---- TEXT ----
-    if "text" in message:
-        text = message["text"].strip()
-
-        if text == "/start":
-            send_message(
-                chat_id,
-                "👋 Welcome!\n\n"
-                "Send me:\n"
-                "• Text\n"
-                "• Files\n"
-                "• Videos\n\n"
-                "Main file/video ka file_id + thumbnail info de dunga 😎"
-            )
-            return
-
-        send_message(chat_id, f"📩 You said:\n{text}")
+    # ---- /start ----
+    if "text" in message and message["text"].strip() == "/start":
+        send_message(
+            chat_id,
+            "👋 Welcome!\n\n"
+            "Send me:\n"
+            "• Any file\n"
+            "• Any video\n\n"
+            "Main tumhe:\n"
+            "• stream link\n"
+            "• download link\n"
+            "• thumbnail link (video)\n\n"
+            "de dunga 😎"
+        )
         return
 
-    # ---- DOCUMENT (FILES) ----
+    # ---- DOCUMENT ----
     if "document" in message:
         doc = message["document"]
         file_id = doc["file_id"]
-        file_name = doc.get("file_name", "unknown")
-        file_size = doc.get("file_size", 0)
+        name = doc.get("file_name", "file")
 
-        reply = (
-            "📁 File Received!\n\n"
-            f"Name: {file_name}\n"
-            f"Size: {file_size} bytes\n"
-            f"File ID:\n{file_id}"
+        stream_link = f"{BASE_URL}/stream/{file_id}"
+
+        send_message(
+            chat_id,
+            f"📁 File Received!\n\n"
+            f"Name: {name}\n\n"
+            f"▶️ Stream / Download:\n{stream_link}"
         )
-
-        send_message(chat_id, reply)
         return
 
     # ---- VIDEO ----
     if "video" in message:
         vid = message["video"]
         file_id = vid["file_id"]
-        file_size = vid.get("file_size", 0)
-        duration = vid.get("duration", 0)
-        width = vid.get("width", 0)
-        height = vid.get("height", 0)
 
-        thumb_info = "❌ No thumbnail"
+        stream_link = f"{BASE_URL}/stream/{file_id}"
+
+        thumb_text = "❌ No thumbnail"
         if "thumbnail" in vid:
-            thumb = vid["thumbnail"]
-            thumb_file_id = thumb["file_id"]
-            thumb_w = thumb.get("width", 0)
-            thumb_h = thumb.get("height", 0)
+            thumb_id = vid["thumbnail"]["file_id"]
+            thumb_link = f"{BASE_URL}/stream/{thumb_id}"
+            thumb_text = f"🖼 Thumbnail Link:\n{thumb_link}"
 
-            thumb_info = (
-                "🖼 Thumbnail Info:\n"
-                f"Thumb File ID:\n{thumb_file_id}\n"
-                f"Resolution: {thumb_w}x{thumb_h}"
-            )
-
-        reply = (
-            "🎬 Video Received!\n\n"
-            f"Duration: {duration} sec\n"
-            f"Resolution: {width}x{height}\n"
-            f"Size: {file_size} bytes\n\n"
-            f"Video File ID:\n{file_id}\n\n"
-            f"{thumb_info}"
+        send_message(
+            chat_id,
+            f"🎬 Video Received!\n\n"
+            f"▶️ Stream / Download:\n{stream_link}\n\n"
+            f"{thumb_text}"
         )
-
-        send_message(chat_id, reply)
         return
 
-    # ---- PHOTO ----
-    if "photo" in message:
-        photos = message["photo"]
-        best = photos[-1]   # highest resolution
-        file_id = best["file_id"]
-        width = best.get("width", 0)
-        height = best.get("height", 0)
-        file_size = best.get("file_size", 0)
-
-        reply = (
-            "🖼 Photo Received!\n\n"
-            f"Resolution: {width}x{height}\n"
-            f"Size: {file_size} bytes\n\n"
-            f"File ID:\n{file_id}"
-        )
-
-        send_message(chat_id, reply)
-        return
-
-    # ---- OTHER ----
-    send_message(chat_id, "❌ Unsupported message type.")
+    send_message(chat_id, "❌ Sirf file ya video bhejo.")
 
 
-# -------- Send Message --------
+# ---------- SEND MESSAGE ----------
 def send_message(chat_id, text):
     url = f"{TELEGRAM_API}/sendMessage"
-    payload = {
-        "chat_id": chat_id,
-        "text": text
-    }
+    payload = {"chat_id": chat_id, "text": text}
     try:
         requests.post(url, json=payload, timeout=10)
     except Exception as e:
         print("Send error:", e)
 
 
-# -------- Main --------
+# ---------- MAIN ----------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     app.run(host="0.0.0.0", port=port)
