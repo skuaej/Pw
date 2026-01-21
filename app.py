@@ -1,17 +1,30 @@
 import os
+import sys
 from pyrogram import Client, filters
 from aiohttp import web
 import motor.motor_asyncio
 import aiohttp_cors
+import asyncio
+
+# --- PRINT FUNCTION TO FORCE LOGS --- #
+def log(text):
+    print(text, flush=True)
 
 # --- CONFIGURATION --- #
-API_ID = int(os.environ.get("API_ID", 12345))
-API_HASH = os.environ.get("API_HASH", "your_hash")
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "your_token")
-# SAHI (RIGHT) - Default value 0 kar do
-CHANNEL_ID = int(os.environ.get("CHANNEL_ID", 0))
-MONGO_URL = os.environ.get("MONGO_URL", "mongodb+srv://...") # Step 1 wala URL
-PORT = int(os.environ.get("PORT", 8080))
+try:
+    API_ID = int(os.environ.get("API_ID", 0))
+    API_HASH = os.environ.get("API_HASH", "")
+    BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
+    CHANNEL_ID = int(os.environ.get("CHANNEL_ID", 0))
+    MONGO_URL = os.environ.get("MONGO_URL", "")
+    PORT = int(os.environ.get("PORT", 8080))
+except Exception as e:
+    log(f"Config Error: {e}")
+
+log(f"--- BOT CONFIGURATION ---")
+log(f"Channel ID to Watch: {CHANNEL_ID}")
+log(f"Port: {PORT}")
+# ----------------------------- #
 
 # --- DATABASE SETUP --- #
 mongo_client = motor.motor_asyncio.AsyncIOMotorClient(MONGO_URL)
@@ -27,6 +40,7 @@ async def save_to_db(message):
     name = "Unknown"
     file_type = "unknown"
     
+    # Identify Media
     if message.video:
         media = message.video
         name = message.video.file_name or message.caption or "Video"
@@ -45,52 +59,63 @@ async def save_to_db(message):
         file_type = "audio"
 
     if media:
-        # Check agar pehle se database me hai
-        exist = await collection.find_one({"msg_id": message.id})
-        if not exist:
-            file_data = {
-                "msg_id": message.id,
-                "name": name,
-                "type": file_type,
-                "size": media.file_size
-            }
-            await collection.insert_one(file_data)
-            print(f"Saved: {name}")
+        try:
+            exist = await collection.find_one({"msg_id": message.id})
+            if not exist:
+                file_data = {
+                    "msg_id": message.id,
+                    "name": name,
+                    "type": file_type,
+                    "size": media.file_size
+                }
+                await collection.insert_one(file_data)
+                log(f"✅ Saved to DB: {name} (ID: {message.id})")
+            else:
+                log(f"⚠️ Already in DB: {name}")
+        except Exception as e:
+            log(f"❌ Database Error: {e}")
 
 # --- BOT EVENTS --- #
 
-# 1. Start hote hi purani files scan karo (Last 50)
-async def index_channel():
-    print("Indexing channel...")
-    async for msg in app.get_chat_history(CHANNEL_ID, limit=50):
-        await save_to_db(msg)
-    print("Indexing done!")
+@app.on_message(filters.command("start"))
+async def start_msg(client, message):
+    await message.reply_text("Bot is Running! Send files to the channel.")
+    log("Start command received.")
 
-# 2. Jab bhi naya message aaye, DB me daalo
+# 1. Start hote hi check karega
+async def check_connection():
+    log("🔄 Checking Channel Connection...")
+    try:
+        chat = await app.get_chat(CHANNEL_ID)
+        log(f"✅ Connected to Channel: {chat.title}")
+    except Exception as e:
+        log(f"❌ ERROR: Could not connect to Channel {CHANNEL_ID}")
+        log(f"Reason: {e}")
+        log("Make sure Bot is ADMIN in the channel!")
+
+# 2. Jab bhi naya message aaye
 @app.on_message(filters.chat(CHANNEL_ID) & filters.media)
 async def new_post(client, message):
+    log(f"📩 New Message Received! ID: {message.id}")
     await save_to_db(message)
 
 # --- WEB SERVER ROUTES --- #
-
-# API jo Website ko Data degi
 async def api_get_files(request):
     files = []
-    # Latest 50 files nikalo
     cursor = collection.find().sort("msg_id", -1).limit(50)
     async for document in cursor:
         files.append({
             "id": document["msg_id"],
             "name": document["name"],
             "type": document["type"],
-            "url": f"/stream/{document['msg_id']}" # Stream URL
+            "url": f"/stream/{document['msg_id']}"
         })
     return web.json_response(files)
 
-# File Streamer (Video play karne ke liye)
 async def stream_handler(request):
     try:
         msg_id = int(request.match_info['msg_id'])
+        log(f"Streaming request for ID: {msg_id}")
         msg = await app.get_messages(CHANNEL_ID, msg_id)
         
         media = getattr(msg, msg.media.value) if msg.media else None
@@ -109,17 +134,21 @@ async def stream_handler(request):
         async for chunk in app.stream_media(media):
             await resp.write(chunk)
         return resp
-    except Exception:
+    except Exception as e:
+        log(f"Stream Error: {e}")
         return web.Response(status=404)
 
 async def health(r): return web.Response(text="Running")
 
 # --- MAIN RUNNER --- #
 if __name__ == "__main__":
+    log("🚀 Starting Bot...")
     app.start()
-    app.loop.create_task(index_channel()) # Start indexing in background
+    
+    # Check Connection
+    app.loop.create_task(check_connection())
 
-    # Web Server setup with CORS (Zaroori hai website ke liye)
+    # Web Server
     server = web.Application()
     cors = aiohttp_cors.setup(server, defaults={
         "*": aiohttp_cors.ResourceOptions(
@@ -133,8 +162,8 @@ if __name__ == "__main__":
         web.get('/stream/{msg_id}', stream_handler)
     ])
     
-    # Enable CORS on routes
     for route in list(server.router.routes()):
         cors.add(route)
 
+    log(f"🌍 Web Server running on port {PORT}")
     web.run_app(server, port=PORT)
