@@ -1,150 +1,139 @@
 import os
-from flask import Flask, request, jsonify
-import requests
+from pyrogram import Client, filters
+from aiohttp import web
+import motor.motor_asyncio
+import aiohttp_cors
 
-# ========= CONFIG =========
-BOT_TOKEN = "YOUR_BOT_TOKEN"
-BOT_SECRET = "BOT_SECRET"
-BOT_WEBHOOK = "/endpoint"
+# --- CONFIGURATION --- #
+API_ID = int(os.environ.get("API_ID", 12345))
+API_HASH = os.environ.get("API_HASH", "your_hash")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "your_token")
+CHANNEL_ID = int(os.environ.get("CHANNEL_ID", -100xxxxxxx))
+MONGO_URL = os.environ.get("MONGO_URL", "mongodb+srv://...") # Step 1 wala URL
+PORT = int(os.environ.get("PORT", 8080))
 
-BASE_URL = "https://balanced-tahr-uhhy5-1600dc3b.koyeb.app"   # apna koyeb URL
-CHANNEL_ID = -1002432952660  # 👈 apna channel id daal
+# --- DATABASE SETUP --- #
+mongo_client = motor.motor_asyncio.AsyncIOMotorClient(MONGO_URL)
+db = mongo_client["my_website_db"]
+collection = db["files"]
 
-TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
+# --- BOT SETUP --- #
+app = Client("auto_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
-app = Flask(__name__)
+# --- HELPER: SAVE FILE TO DB --- #
+async def save_to_db(message):
+    media = None
+    name = "Unknown"
+    file_type = "unknown"
+    
+    if message.video:
+        media = message.video
+        name = message.video.file_name or message.caption or "Video"
+        file_type = "video"
+    elif message.document:
+        media = message.document
+        name = message.document.file_name
+        file_type = "document"
+    elif message.photo:
+        media = message.photo
+        name = message.caption or "Image"
+        file_type = "image"
+    elif message.audio:
+        media = message.audio
+        name = message.audio.file_name
+        file_type = "audio"
 
+    if media:
+        # Check agar pehle se database me hai
+        exist = await collection.find_one({"msg_id": message.id})
+        if not exist:
+            file_data = {
+                "msg_id": message.id,
+                "name": name,
+                "type": file_type,
+                "size": media.file_size
+            }
+            await collection.insert_one(file_data)
+            print(f"Saved: {name}")
 
-# ---------- HEALTH ----------
-@app.route("/", methods=["GET"])
-def home():
-    return "Telegram Stream Bot Running!", 200
+# --- BOT EVENTS --- #
 
+# 1. Start hote hi purani files scan karo (Last 50)
+async def index_channel():
+    print("Indexing channel...")
+    async for msg in app.get_chat_history(CHANNEL_ID, limit=50):
+        await save_to_db(msg)
+    print("Indexing done!")
 
-# ---------- STREAM ----------
-@app.route("/stream/<file_id>", methods=["GET"])
-def stream_file(file_id):
-    r = requests.get(
-        f"{TELEGRAM_API}/getFile",
-        params={"file_id": file_id},
-        timeout=10
-    )
-    data = r.json()
+# 2. Jab bhi naya message aaye, DB me daalo
+@app.on_message(filters.chat(CHANNEL_ID) & filters.media)
+async def new_post(client, message):
+    await save_to_db(message)
 
-    if not data.get("ok"):
-        return "Invalid file_id", 404
+# --- WEB SERVER ROUTES --- #
 
-    file_path = data["result"]["file_path"]
-    file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
+# API jo Website ko Data degi
+async def api_get_files(request):
+    files = []
+    # Latest 50 files nikalo
+    cursor = collection.find().sort("msg_id", -1).limit(50)
+    async for document in cursor:
+        files.append({
+            "id": document["msg_id"],
+            "name": document["name"],
+            "type": document["type"],
+            "url": f"/stream/{document['msg_id']}" # Stream URL
+        })
+    return web.json_response(files)
 
-    return jsonify({"ok": True, "file_url": file_url})
+# File Streamer (Video play karne ke liye)
+async def stream_handler(request):
+    try:
+        msg_id = int(request.match_info['msg_id'])
+        msg = await app.get_messages(CHANNEL_ID, msg_id)
+        
+        media = getattr(msg, msg.media.value) if msg.media else None
+        if not media: return web.Response(status=404)
 
-
-# ---------- WEBHOOK ----------
-@app.route(BOT_WEBHOOK, methods=["POST"])
-def webhook():
-    secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
-    if secret != BOT_SECRET:
-        return "Unauthorized", 403
-
-    update = request.get_json(force=True)
-
-    if "message" in update:
-        handle_message(update["message"])
-
-    return "OK", 200
-
-
-# ---------- HANDLER ----------
-def handle_message(message):
-    chat_id = message["chat"]["id"]
-
-    # ---- /start ----
-    if "text" in message and message["text"].strip() == "/start":
-        send_message(
-            chat_id,
-            "👋 Welcome!\n\n"
-            "Send me any file or video.\n\n"
-            "Main:\n"
-            "• channel me upload karunga\n"
-            "• stream/download link dunga\n"
-            "• thumbnail link dunga (video)\n"
+        resp = web.StreamResponse(
+            status=200, 
+            reason='OK', 
+            headers={
+                'Content-Type': getattr(media, 'mime_type', 'application/octet-stream'),
+                'Content-Disposition': f'inline; filename="{getattr(media, "file_name", "file")}"',
+                'Content-Length': str(media.file_size)
+            }
         )
-        return
+        await resp.prepare(request)
+        async for chunk in app.stream_media(media):
+            await resp.write(chunk)
+        return resp
+    except Exception:
+        return web.Response(status=404)
 
-    # ---- DOCUMENT ----
-    if "document" in message:
-        doc = message["document"]
-        file_id = doc["file_id"]
-        name = doc.get("file_name", "file")
+async def health(r): return web.Response(text="Running")
 
-        print(f"[FILE] name={name} file_id={file_id}")
-
-        # forward to channel
-        forward_to_channel(chat_id, message["message_id"])
-
-        stream_link = f"{BASE_URL}/stream/{file_id}"
-
-        send_message(
-            chat_id,
-            f"📁 File Received & Uploaded to Channel!\n\n"
-            f"Name: {name}\n\n"
-            f"▶️ Stream / Download:\n{stream_link}"
-        )
-        return
-
-    # ---- VIDEO ----
-    if "video" in message:
-        vid = message["video"]
-        file_id = vid["file_id"]
-
-        print(f"[VIDEO] file_id={file_id}")
-
-        forward_to_channel(chat_id, message["message_id"])
-
-        stream_link = f"{BASE_URL}/stream/{file_id}"
-
-        thumb_text = "❌ No thumbnail"
-        if "thumbnail" in vid:
-            thumb_id = vid["thumbnail"]["file_id"]
-            thumb_link = f"{BASE_URL}/stream/{thumb_id}"
-            thumb_text = f"🖼 Thumbnail Link:\n{thumb_link}"
-
-            print(f"[THUMB] thumb_file_id={thumb_id}")
-
-        send_message(
-            chat_id,
-            f"🎬 Video Received & Uploaded to Channel!\n\n"
-            f"▶️ Stream / Download:\n{stream_link}\n\n"
-            f"{thumb_text}"
-        )
-        return
-
-    send_message(chat_id, "❌ Sirf file ya video bhejo.")
-
-
-# ---------- HELPERS ----------
-def send_message(chat_id, text):
-    requests.post(
-        f"{TELEGRAM_API}/sendMessage",
-        json={"chat_id": chat_id, "text": text},
-        timeout=10
-    )
-
-
-def forward_to_channel(from_chat_id, message_id):
-    requests.post(
-        f"{TELEGRAM_API}/forwardMessage",
-        json={
-            "chat_id": CHANNEL_ID,
-            "from_chat_id": from_chat_id,
-            "message_id": message_id
-        },
-        timeout=10
-    )
-
-
-# ---------- MAIN ----------
+# --- MAIN RUNNER --- #
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8000))
-    app.run(host="0.0.0.0", port=port)
+    app.start()
+    app.loop.create_task(index_channel()) # Start indexing in background
+
+    # Web Server setup with CORS (Zaroori hai website ke liye)
+    server = web.Application()
+    cors = aiohttp_cors.setup(server, defaults={
+        "*": aiohttp_cors.ResourceOptions(
+            allow_credentials=True, expose_headers="*", allow_headers="*",
+        )
+    })
+    
+    server.add_routes([
+        web.get('/', health),
+        web.get('/api/files', api_get_files),
+        web.get('/stream/{msg_id}', stream_handler)
+    ])
+    
+    # Enable CORS on routes
+    for route in list(server.router.routes()):
+        cors.add(route)
+
+    web.run_app(server, port=PORT)
