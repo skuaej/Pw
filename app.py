@@ -1,198 +1,149 @@
-from flask import Flask, request, Response
-import requests
-import sqlite3
 import os
+from flask import Flask, request
+import requests
 
-BOT_TOKEN = os.environ.get("8234149040:AAGsdw8QZbtKcUgylM2mn8aNW07xc7YYMpk")
-print("BOT_TOKEN loaded:", bool(BOT_TOKEN))
+# ========= CONFIG =========
+BOT_TOKEN = "8234149040:AAGsdw8QZbtKcUgylM2mn8aNW07xc7YYMpk"
+BOT_SECRET = "Byjjjy56uujjjjnj666"
+BOT_WEBHOOK = "/endpoint"
 
-if not BOT_TOKEN:
-    raise RuntimeError("❌ BOT_TOKEN env var not set")
+TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 app = Flask(__name__)
 
-# ---------- Database Setup ----------
-conn = sqlite3.connect("files.db", check_same_thread=False)
-cur = conn.cursor()
-cur.execute("""
-CREATE TABLE IF NOT EXISTS files (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    file_id TEXT,
-    file_name TEXT,
-    caption TEXT,
-    thumb_id TEXT
-)
-""")
-conn.commit()
 
-# ---------- Webhook Receiver (CRASH-PROOF) ----------
-@app.route("/webhook", methods=["POST"])
+# -------- Home --------
+@app.route("/", methods=["GET"])
+def home():
+    return "✅ Telegram Webhook Bot is Running!", 200
+
+
+# -------- Webhook --------
+@app.route(BOT_WEBHOOK, methods=["POST"])
 def webhook():
+    secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
+    if secret != BOT_SECRET:
+        return "Unauthorized", 403
+
+    update = request.get_json(force=True)
+
+    if "message" in update:
+        handle_message(update["message"])
+
+    return "OK", 200
+
+
+# -------- Message Handler --------
+def handle_message(message):
+    chat_id = message["chat"]["id"]
+
+    # ---- TEXT ----
+    if "text" in message:
+        text = message["text"].strip()
+
+        if text == "/start":
+            send_message(
+                chat_id,
+                "👋 Welcome!\n\n"
+                "Send me:\n"
+                "• Text\n"
+                "• Files\n"
+                "• Videos\n\n"
+                "Main file/video ka file_id + thumbnail info de dunga 😎"
+            )
+            return
+
+        send_message(chat_id, f"📩 You said:\n{text}")
+        return
+
+    # ---- DOCUMENT (FILES) ----
+    if "document" in message:
+        doc = message["document"]
+        file_id = doc["file_id"]
+        file_name = doc.get("file_name", "unknown")
+        file_size = doc.get("file_size", 0)
+
+        reply = (
+            "📁 File Received!\n\n"
+            f"Name: {file_name}\n"
+            f"Size: {file_size} bytes\n"
+            f"File ID:\n{file_id}"
+        )
+
+        send_message(chat_id, reply)
+        return
+
+    # ---- VIDEO ----
+    if "video" in message:
+        vid = message["video"]
+        file_id = vid["file_id"]
+        file_size = vid.get("file_size", 0)
+        duration = vid.get("duration", 0)
+        width = vid.get("width", 0)
+        height = vid.get("height", 0)
+
+        thumb_info = "❌ No thumbnail"
+        if "thumbnail" in vid:
+            thumb = vid["thumbnail"]
+            thumb_file_id = thumb["file_id"]
+            thumb_w = thumb.get("width", 0)
+            thumb_h = thumb.get("height", 0)
+
+            thumb_info = (
+                "🖼 Thumbnail Info:\n"
+                f"Thumb File ID:\n{thumb_file_id}\n"
+                f"Resolution: {thumb_w}x{thumb_h}"
+            )
+
+        reply = (
+            "🎬 Video Received!\n\n"
+            f"Duration: {duration} sec\n"
+            f"Resolution: {width}x{height}\n"
+            f"Size: {file_size} bytes\n\n"
+            f"Video File ID:\n{file_id}\n\n"
+            f"{thumb_info}"
+        )
+
+        send_message(chat_id, reply)
+        return
+
+    # ---- PHOTO ----
+    if "photo" in message:
+        photos = message["photo"]
+        best = photos[-1]   # highest resolution
+        file_id = best["file_id"]
+        width = best.get("width", 0)
+        height = best.get("height", 0)
+        file_size = best.get("file_size", 0)
+
+        reply = (
+            "🖼 Photo Received!\n\n"
+            f"Resolution: {width}x{height}\n"
+            f"Size: {file_size} bytes\n\n"
+            f"File ID:\n{file_id}"
+        )
+
+        send_message(chat_id, reply)
+        return
+
+    # ---- OTHER ----
+    send_message(chat_id, "❌ Unsupported message type.")
+
+
+# -------- Send Message --------
+def send_message(chat_id, text):
+    url = f"{TELEGRAM_API}/sendMessage"
+    payload = {
+        "chat_id": chat_id,
+        "text": text
+    }
     try:
-        data = request.get_json(force=True)
-        print("----- NEW UPDATE -----")
-        print(data)
-
-        msg = None
-        if isinstance(data, dict):
-            if "channel_post" in data:
-                msg = data["channel_post"]
-            elif "message" in data:
-                msg = data["message"]
-
-        if not msg:
-            return "ok"
-
-        # ---------- /start ----------
-        if msg.get("text") == "/start":
-            chat_id = msg["chat"]["id"]
-            r = requests.post(
-                f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-                data={
-                    "chat_id": chat_id,
-                    "text": "✅ Bot is running on Koyeb!\nSend any file and it will appear on the web page."
-                },
-                timeout=10
-            )
-            print("sendMessage response:", r.text)
-            return "ok"
-
-        file_id = None
-        file_name = None
-        thumb_id = None
-
-        doc = msg.get("document")
-        vid = msg.get("video")
-        photos = msg.get("photo")
-        aud = msg.get("audio")
-
-        if doc:
-            file_id = doc.get("file_id")
-            file_name = doc.get("file_name", "file")
-
-        elif vid:
-            file_id = vid.get("file_id")
-            file_name = vid.get("file_name", "video.mp4")
-            thumb = vid.get("thumbnail")
-            if thumb:
-                thumb_id = thumb.get("file_id")
-
-        elif photos:
-            file_id = photos[-1].get("file_id")
-            file_name = "image.jpg"
-            thumb_id = file_id
-
-        elif aud:
-            file_id = aud.get("file_id")
-            file_name = aud.get("file_name", "audio.mp3")
-
-        caption = msg.get("caption", "")
-
-        if file_id and file_name:
-            cur.execute(
-                "INSERT INTO files (file_id, file_name, caption, thumb_id) VALUES (?, ?, ?, ?)",
-                (file_id, file_name, caption, thumb_id)
-            )
-            conn.commit()
-            print("Saved:", file_name)
-
-        return "ok"
-
+        requests.post(url, json=payload, timeout=10)
     except Exception as e:
-        # 🔥 Prevents Telegram 500 + logs real error
-        print("❌ WEBHOOK CRASH:", repr(e))
-        return "ok"
+        print("Send error:", e)
 
-# ---------- Home Page ----------
-@app.route("/")
-def index():
-    cur.execute("SELECT id, file_id, file_name, caption, thumb_id FROM files ORDER BY id DESC")
-    rows = cur.fetchall()
 
-    html = """
-    <html>
-    <head>
-        <title>Telegram Files</title>
-        <style>
-            body { font-family: Arial; background:#111; color:#eee; padding:20px; }
-            a { color:#4ea3ff; text-decoration:none; }
-            .file { margin-bottom:15px; padding:10px; background:#1c1c1c; border-radius:8px; }
-            img { max-width:220px; border-radius:8px; display:block; margin-bottom:8px; }
-        </style>
-    </head>
-    <body>
-        <h2>📂 Telegram Files</h2>
-    """
-
-    for f in rows:
-        thumb_html = ""
-        if f[4]:
-            thumb_html = f"<img src='/thumb/{f[4]}'>"
-
-        html += f"""
-        <div class='file'>
-            {thumb_html}
-            <b>{f[2]}</b><br>
-            {f[3]}<br>
-            <a href='/stream/{f[1]}'>Download / Watch</a>
-        </div>
-        """
-
-    html += "</body></html>"
-    return html
-
-# ---------- Thumbnail Proxy ----------
-@app.route("/thumb/<file_id>")
-def thumb(file_id):
-    r = requests.get(
-        f"https://api.telegram.org/bot{BOT_TOKEN}/getFile?file_id={file_id}"
-    ).json()
-
-    if not r.get("ok"):
-        return ""
-
-    path = r["result"]["file_path"]
-    file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{path}"
-
-    resp = requests.get(file_url, stream=True)
-
-    return Response(
-        resp.iter_content(chunk_size=8192),
-        content_type=resp.headers.get("Content-Type", "image/jpeg")
-    )
-
-# ---------- File Stream (Correct Filename) ----------
-@app.route("/stream/<file_id>")
-def stream(file_id):
-    cur.execute("SELECT file_name FROM files WHERE file_id = ?", (file_id,))
-    row = cur.fetchone()
-    filename = row[0] if row else "file"
-
-    r = requests.get(
-        f"https://api.telegram.org/bot{BOT_TOKEN}/getFile?file_id={file_id}"
-    ).json()
-
-    if not r.get("ok"):
-        return "File not found"
-
-    path = r["result"]["file_path"]
-    file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{path}"
-
-    resp = requests.get(file_url, stream=True)
-
-    return Response(
-        resp.iter_content(chunk_size=8192),
-        content_type=resp.headers.get("Content-Type", "application/octet-stream"),
-        headers={
-            "Content-Disposition": f'attachment; filename="{filename}"'
-        }
-    )
-
-# ---------- Health Check ----------
-@app.route("/health")
-def health():
-    return "OK"
-
+# -------- Main --------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     app.run(host="0.0.0.0", port=port)
