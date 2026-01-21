@@ -1,96 +1,89 @@
 import os
-import asyncio
-from pyrogram import Client, filters
-from aiohttp import web
-import motor.motor_asyncio
-import aiohttp_cors
+import requests
+from flask import Flask, render_template_string, redirect
+from telegram import Update
+from telegram.ext import ApplicationBuilder, MessageHandler, ContextTypes, filters
+import threading
 
-# --- LOGGING ---
-def log(text):
-    print(f"[BOT_LOG] {text}", flush=True)
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+BOT_USERNAME = os.getenv("BOT_USERNAME")  # without @
+CHANNEL_ID = int(os.getenv("CHANNEL_ID"))  # -100xxxx
 
-# --- CONFIG ---
-API_ID = int(os.environ.get("API_ID", 0))
-API_HASH = os.environ.get("API_HASH", "")
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
-CHANNEL_ID = int(os.environ.get("CHANNEL_ID", 0))
-MONGO_URL = os.environ.get("MONGO_URL", "")
+FILES_DB = []
 
-# --- DATABASE ---
-log("🔄 DB Connecting...")
-mongo_client = motor.motor_asyncio.AsyncIOMotorClient(MONGO_URL)
-db = mongo_client["Cluster0g"]
-collection = db["files"]
+app = Flask(__name__)
 
-# --- BOT CLIENT ---
-# Session ka naam change kar diya hai fresh start ke liye
-app = Client("final_fix_session", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+HTML = """
+<!doctype html>
+<html>
+<head>
+<title>Telegram File Server</title>
+<style>
+body{font-family:Arial;background:#111;color:#fff;padding:20px}
+.card{background:#222;padding:15px;margin:10px;border-radius:10px}
+a{color:#0af;text-decoration:none}
+</style>
+</head>
+<body>
+<h2>📁 File Server</h2>
+{% for f in files %}
+<div class="card">
+<b>{{f['name']}}</b><br>
+Type: {{f['type']}}<br>
+<a href="/download/{{loop.index0}}">⬇ Download</a> |
+<a href="/stream/{{loop.index0}}">▶ Stream</a>
+</div>
+{% endfor %}
+</body>
+</html>
+"""
 
-# --- UNIVERSAL MESSAGE LISTENER ---
-@app.on_message()
-async def all_messages(client, message):
-    # DUNIYA KA KOI BHI MESSAGE AAYEGA TO YE PRINT HOGA
-    log(f"📩 NEW MESSAGE: ChatID={message.chat.id} | User={message.from_user.id if message.from_user else 'None'}")
-    
-    # Reply test
-    if message.text == "/start":
-        await message.reply_text("Bhai main sahi mein zinda hoon! Channel monitor chalu hai.")
+@app.route("/")
+def home():
+    return render_template_string(HTML, files=FILES_DB)
 
-    # Channel ID Match Logic
-    if message.chat.id == CHANNEL_ID:
-        log("🎯 MATCH FOUND: Message is from your Channel!")
-        if message.media:
-            media = message.video or message.document or message.photo or message.audio
-            if isinstance(media, list): media = media[-1]
-            file_name = getattr(media, "file_name", f"file_{message.id}")
-            
-            await collection.update_one(
-                {"msg_id": message.id},
-                {"$set": {
-                    "msg_id": message.id,
-                    "name": file_name,
-                    "type": message.media.value,
-                    "size": getattr(media, "file_size", 0)
-                }},
-                upsert=True
-            )
-            log(f"✅ DB UPDATED: {file_name}")
+@app.route("/download/<int:i>")
+def download(i):
+    file_id = FILES_DB[i]["file_id"]
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/getFile?file_id={file_id}"
+    r = requests.get(url).json()
+    path = r["result"]["file_path"]
+    return redirect(f"https://api.telegram.org/file/bot{BOT_TOKEN}/{path}")
 
-# --- WEB API ---
-async def api_get_files(request):
-    files = []
-    async for doc in collection.find().sort("msg_id", -1):
-        files.append({"id": doc["msg_id"], "name": doc["name"], "url": f"/stream/{doc['msg_id']}"})
-    return web.json_response(files)
+@app.route("/stream/<int:i>")
+def stream(i):
+    file_id = FILES_DB[i]["file_id"]
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/getFile?file_id={file_id}"
+    r = requests.get(url).json()
+    path = r["result"]["file_path"]
+    return redirect(f"https://api.telegram.org/file/bot{BOT_TOKEN}/{path}")
 
-# --- STARTUP LOGIC ---
-async def on_startup(app_web):
-    log("🚀 Bot Starting...")
-    await app.start()
-    me = await app.get_me()
-    log(f"✅ BOT ONLINE: @{me.username}")
-    log(f"📡 TARGET CHANNEL ID: {CHANNEL_ID}")
+async def handle_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.channel_post
 
-async def on_cleanup(app_web):
-    await app.stop()
+    if msg.video:
+        f = msg.video
+        FILES_DB.append({"file_id": f.file_id, "name": "video.mp4", "type": "video"})
+    elif msg.document:
+        f = msg.document
+        FILES_DB.append({"file_id": f.file_id, "name": f.file_name, "type": "document"})
+    elif msg.audio:
+        f = msg.audio
+        FILES_DB.append({"file_id": f.file_id, "name": f.file_name, "type": "audio"})
+    elif msg.photo:
+        f = msg.photo[-1]
+        FILES_DB.append({"file_id": f.file_id, "name": "image.jpg", "type": "image"})
 
-# --- RUNNING APP ---
+    await context.bot.send_message(
+        chat_id=CHANNEL_ID,
+        text="✅ File added to web server!"
+    )
+
+def run_bot():
+    app_bot = ApplicationBuilder().token(BOT_TOKEN).build()
+    app_bot.add_handler(MessageHandler(filters.ALL, handle_files))
+    app_bot.run_polling()
+
 if __name__ == "__main__":
-    server = web.Application()
-    server.on_startup.append(on_startup)
-    server.on_cleanup.append(on_cleanup)
-    
-    cors = aiohttp_cors.setup(server, defaults={
-        "*": aiohttp_cors.ResourceOptions(allow_credentials=True, expose_headers="*", allow_headers="*")
-    })
-    
-    server.add_routes([
-        web.get('/', lambda r: web.Response(text="Bot Alive and Running!")),
-        web.get('/api/files', api_get_files)
-    ])
-    
-    for route in list(server.router.routes()):
-        cors.add(route)
-
-    log("🌍 Web Server starting on port 8000")
-    web.run_app(server, port=8000)
+    threading.Thread(target=run_bot).start()
+    app.run(host="0.0.0.0", port=8000)
