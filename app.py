@@ -22,7 +22,7 @@ except Exception as e:
 
 # --- DATABASE --- #
 mongo_client = motor.motor_asyncio.AsyncIOMotorClient(MONGO_URL)
-db = mongo_client["my_website_db"]
+db = mongo_client["Cluster0g"]
 collection = db["files"]
 
 # --- BOT CLIENT --- #
