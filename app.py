@@ -1,6 +1,7 @@
 import os
 import asyncio
 from pyrogram import Client, filters, enums
+from pyrogram.errors import RPCError
 from aiohttp import web
 import motor.motor_asyncio
 import aiohttp_cors
@@ -14,9 +15,10 @@ try:
     API_ID = int(os.environ.get("API_ID", 0))
     API_HASH = os.environ.get("API_HASH", "")
     BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
+    # Ensure CHANNEL_ID is an integer and starts with -100
     CHANNEL_ID = int(os.environ.get("CHANNEL_ID", 0))
     MONGO_URL = os.environ.get("MONGO_URL", "")
-    PORT = int(os.environ.get("PORT", 8080))
+    PORT = int(os.environ.get("PORT", 8000))
 except Exception as e:
     log(f"Config Error: {e}")
 
@@ -26,6 +28,7 @@ db = mongo_client["Cluster0g"]
 collection = db["files"]
 
 # --- BOT CLIENT --- #
+# use_cache=True helps with Peer ID resolution
 app = Client("auto_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
 # --- SAVE TO DB FUNCTION --- #
@@ -53,7 +56,6 @@ async def save_to_db(message):
 
     if media:
         try:
-            # Check agar file pehle se hai
             exist = await collection.find_one({"msg_id": message.id})
             if not exist:
                 file_data = {
@@ -71,27 +73,23 @@ async def save_to_db(message):
 
 # --- BOT HANDLERS --- #
 
-# 1. Start Command (Testing ke liye)
-@app.on_message(filters.command("start"))
+@app.on_message(filters.command("start") & filters.private)
 async def start_command(client, message):
-    log(f"Start command received from {message.from_user.first_name}")
     await message.reply_text(
         "👋 **Bot is Online!**\n\n"
-        "I am connected to the Database.\n"
-        "Send files to the Channel, I will Auto-Save them."
+        f"Connected to Channel ID: `{CHANNEL_ID}`\n"
+        "Send files to the Channel to save them."
     )
 
-# 2. Channel Listener
 @app.on_message(filters.chat(CHANNEL_ID) & filters.media)
 async def channel_post_handler(client, message):
-    log(f"📩 New Media in Channel: {message.id}")
+    log(f"📩 Media Update in Channel: {message.id}")
     await save_to_db(message)
 
 # --- WEB SERVER HANDLERS --- #
 
 async def api_get_files(request):
     files = []
-    # Latest 100 files
     cursor = collection.find().sort("msg_id", -1).limit(100)
     async for doc in cursor:
         files.append({
@@ -106,23 +104,34 @@ async def stream_handler(request):
     try:
         msg_id = int(request.match_info['msg_id'])
         msg = await app.get_messages(CHANNEL_ID, msg_id)
-        media = getattr(msg, msg.media.value) if msg.media else None
         
-        if not media: return web.Response(status=404)
+        # Determine media type dynamically
+        media = None
+        for attr in ["video", "document", "photo", "audio"]:
+            if getattr(msg, attr, None):
+                media = getattr(msg, attr)
+                break
+        
+        if not media: 
+            return web.Response(status=404, text="Media not found")
+
+        # Photo handling (Photos are lists in Pyrogram)
+        if isinstance(media, list): media = media[-1]
 
         resp = web.StreamResponse(
             status=200, reason='OK', 
             headers={
                 'Content-Type': getattr(media, 'mime_type', 'application/octet-stream'),
                 'Content-Disposition': f'inline; filename="{getattr(media, "file_name", "file")}"',
-                'Content-Length': str(media.file_size)
+                'Content-Length': str(getattr(media, 'file_size', 0))
             }
         )
         await resp.prepare(request)
         async for chunk in app.stream_media(media):
             await resp.write(chunk)
         return resp
-    except Exception:
+    except Exception as e:
+        log(f"Stream Error: {e}")
         return web.Response(status=404)
 
 async def health_check(request):
@@ -131,23 +140,19 @@ async def health_check(request):
 # --- STARTUP & SHUTDOWN LOGIC --- #
 
 async def on_startup(app_web):
-    log("🚀 Starting Bot...")
+    log("🚀 Starting Bot Client...")
     await app.start()
     
-    # Check Admin Rights & Connection
+    me = await app.get_me()
+    log(f"✅ Bot Logged in as: @{me.username}")
+
     try:
+        # Check if Channel is accessible
         chat = await app.get_chat(CHANNEL_ID)
-        log(f"✅ CONNECTED TO CHANNEL: {chat.title} ({chat.id})")
-        
-        # Check if Admin
-        me = await app.get_chat_member(CHANNEL_ID, "me")
-        if me.status in [enums.ChatMemberStatus.ADMINISTRATOR, enums.ChatMemberStatus.OWNER]:
-            log("✅ Bot is ADMIN. Ready to save files.")
-        else:
-            log("⚠️ WARNING: Bot is NOT Admin! Make it Admin to read messages.")
-            
-    except Exception as e:
-        log(f"❌ ERROR: Cannot access channel. Check CHANNEL_ID.\nError: {e}")
+        log(f"✅ CONNECTED TO: {chat.title} ({chat.id})")
+    except RPCError as e:
+        log(f"❌ PEER ERROR: {e}")
+        log("💡 FIX: 1. Add Bot to Channel. 2. Make Bot Admin. 3. Post a message in the channel.")
 
 async def on_cleanup(app_web):
     log("🛑 Stopping Bot...")
@@ -156,10 +161,8 @@ async def on_cleanup(app_web):
 # --- MAIN ENTRY POINT --- #
 
 if __name__ == "__main__":
-    # Web App Setup
     server = web.Application()
     
-    # Ye line Bot ko Web Server ke saath start karegi
     server.on_startup.append(on_startup)
     server.on_cleanup.append(on_cleanup)
 
@@ -180,6 +183,4 @@ if __name__ == "__main__":
         cors.add(route)
 
     log(f"🌍 Starting Web Server on Port {PORT}")
-    
-    # Run App
     web.run_app(server, port=PORT)
