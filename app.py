@@ -1,8 +1,15 @@
 import os
 import requests
+import asyncio
 from flask import Flask, request, render_template_string, redirect
 from telegram import Update
-from telegram.ext import Application, ContextTypes, MessageHandler, filters
+from telegram.ext import (
+    Application,
+    ContextTypes,
+    MessageHandler,
+    CommandHandler,
+    filters
+)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_ID = int(os.getenv("CHANNEL_ID"))
@@ -41,39 +48,79 @@ Type: {{f['type']}}<br>
 </html>
 """
 
+# -------------------- WEB ROUTES --------------------
+
 @app.route("/")
 def home():
     return render_template_string(HTML, files=FILES_DB)
 
 @app.route("/download/<int:i>")
 def download(i):
-    file_id = FILES_DB[i]["file_id"]
-    r = requests.get(
-        f"https://api.telegram.org/bot{BOT_TOKEN}/getFile",
-        params={"file_id": file_id}
-    ).json()
-    path = r["result"]["file_path"]
-    return redirect(f"https://api.telegram.org/file/bot{BOT_TOKEN}/{path}")
+    try:
+        file_id = FILES_DB[i]["file_id"]
+        r = requests.get(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/getFile",
+            params={"file_id": file_id},
+            timeout=15
+        ).json()
+
+        path = r["result"]["file_path"]
+        return redirect(f"https://api.telegram.org/file/bot{BOT_TOKEN}/{path}")
+    except Exception as e:
+        print("❌ Download error:", e)
+        return "Download error", 500
 
 @app.route("/stream/<int:i>")
 def stream(i):
     return download(i)
 
 @app.route("/endpoint", methods=["POST"])
-async def telegram_webhook():
-    data = request.get_json(force=True)
-    print("📩 Update received:", data)   # DEBUG LINE
+def telegram_webhook():
+    data = request.get_json(force=True, silent=True)
+
+    print("📩 Webhook update received:", data)  # DEBUG LOG
+
+    if not data:
+        return "NO DATA", 400
 
     update = Update.de_json(data, bot_app.bot)
-    await bot_app.process_update(update)
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(bot_app.process_update(update))
+    loop.close()
+
     return "OK"
+
+@app.route("/setwebhook")
+def set_webhook():
+    r = requests.get(
+        f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook",
+        params={"url": f"{BASE_URL}/endpoint"}
+    ).json()
+
+    print("🔗 setWebhook response:", r)
+    return r
+
+# -------------------- BOT HANDLERS --------------------
+
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    print("👋 /start received from:", update.effective_user.id)
+
+    await update.message.reply_text(
+        "✅ I am online!\n\n"
+        "Send files to the channel and view them on the website:\n"
+        f"{BASE_URL}"
+    )
 
 async def handle_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.channel_post
 
     if not msg:
-        print("❌ No channel_post in update")
+        print("❌ Update has no channel_post")
         return
+
+    print("📦 Channel post received")
 
     file_data = None
 
@@ -83,11 +130,19 @@ async def handle_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif msg.document:
         f = msg.document
-        file_data = {"file_id": f.file_id, "name": f.file_name or "file", "type": "document"}
+        file_data = {
+            "file_id": f.file_id,
+            "name": f.file_name or "file",
+            "type": "document"
+        }
 
     elif msg.audio:
         f = msg.audio
-        file_data = {"file_id": f.file_id, "name": f.file_name or "audio.mp3", "type": "audio"}
+        file_data = {
+            "file_id": f.file_id,
+            "name": f.file_name or "audio.mp3",
+            "type": "audio"
+        }
 
     elif msg.photo:
         f = msg.photo[-1]
@@ -95,21 +150,26 @@ async def handle_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if file_data:
         FILES_DB.append(file_data)
-        print("✅ File stored:", file_data)
+        print("✅ FILE STORED:", file_data)
+        print("📊 TOTAL FILES:", len(FILES_DB))
     else:
-        print("ℹ Channel post but not a file")
+        print("ℹ Channel post but not a supported file")
+
+# Register handlers
+bot_app.add_handler(CommandHandler("start", start_command))
 
 bot_app.add_handler(
-    MessageHandler(filters.VIDEO | filters.Document.ALL | filters.AUDIO | filters.PHOTO, handle_files)
+    MessageHandler(
+        filters.VIDEO | filters.Document.ALL | filters.AUDIO | filters.PHOTO,
+        handle_files
+    )
 )
 
-@app.route("/setwebhook")
-def set_webhook():
-    r = requests.get(
-        f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook",
-        params={"url": f"{BASE_URL}/endpoint"}
-    ).json()
-    return r
+# -------------------- START APP --------------------
 
 if __name__ == "__main__":
+    print("🚀 App starting...")
+    print("🌐 BASE_URL:", BASE_URL)
+    print("📢 CHANNEL_ID:", CHANNEL_ID)
+
     app.run(host="0.0.0.0", port=8000)
